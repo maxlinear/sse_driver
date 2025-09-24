@@ -50,6 +50,7 @@ typedef struct {
     char obj_name[FILEPNAME_MAX];	/* Unique Identifier of Object Data */
     sst_access_policy_t policy;		/* secure store access policy */
     sst_flags_t flags;				/* Secure Store flags */
+    secure_wrap_asset_tep_t wrap_asset;
 } sst_config_t;
 
 int sse_secure_storage_create_open(sst_param_t *sst_param,

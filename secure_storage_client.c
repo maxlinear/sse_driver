@@ -53,25 +53,99 @@ typedef struct sst_iccpool_info {
 
 static iccpool_info_t iccpool_inf;
 
+extern int (*sse_secure_storage_create_open_fn)(sst_param_t *sst_param,
+					sst_config_t *secure_store_config);
+
+extern int (*sse_secure_storage_save_fn)(sst_data_param_t *sst_save_param,
+                                        sst_config_t *secure_store_config);
+
+extern int (*sse_secure_storage_load_fn)(sst_data_param_t *sst_load_param,
+                                        sst_config_t *secure_store_config);
+
+extern int (*sse_secure_storage_close_delete_fn)(sst_param_t *sst_del_param,
+                                        sst_config_t *secure_store_config);
+
+
 #ifdef SST_DEBUG
 static void dump_ss_config(sst_config_t *dump_msg)
 {
 	if (!dump_msg)
 		return;
 
-	pr_debug("UID %d\n", dump_msg->uid_val);
-	pr_debug("GID %d\n", dump_msg->gid_val);
-	pr_debug("pname %s\n", dump_msg->pname);
-	pr_debug("src data buff %x\n", dump_msg->pdata_buf);
-	pr_debug("object_src_data_len %d\n", dump_msg->data_len);
-	pr_debug("object name %s\n", dump_msg->obj_name);
-	pr_debug("SST object policy attr %x\n", dump_msg->policy.policy_attr.u.attr);
-	pr_debug("SST object policy perms %x\n", dump_msg->policy.access_perm.u.perms);
-	pr_debug("sizeof sst_config_t %ld\n", sizeof(sst_config_t));
+	pr_info("UID %d\n", dump_msg->uid_val);
+	pr_info("GID %d\n", dump_msg->gid_val);
+	pr_info("pname %s\n", dump_msg->pname);
+	pr_info("src data buff %x\n", dump_msg->pdata_buf);
+	pr_info("object_src_data_len %d\n", dump_msg->data_len);
+	pr_info("object name %s\n", dump_msg->obj_name);
+	pr_info("SST object policy attr %x\n", dump_msg->policy.policy_attr.u.attr);
+	pr_info("SST object policy perms %x\n", dump_msg->policy.access_perm.u.perms);
+	pr_info("sizeof sst_config_t %ld\n", sizeof(sst_config_t));
+	pr_info("wrap_key_location: %d\n", dump_msg->wrap_asset.key_location);
+	pr_info("wrap_key_asset_id: %d\n", dump_msg->wrap_asset.u.asset_number);
 
 	return;
 }
 #endif
+
+static bool sse_copy_wrap_asset(secure_wrap_asset_t *wrap_asset,
+				sst_config_t *secure_store_config)
+{
+	bool ret = true;
+
+	/* wrap key location: 0b00 - NoWrap; 0b01 - OTP; 0b10 - SST */
+	if ((wrap_asset->key_location == NO_WRAP_KEY) ||
+		(!wrap_asset->key_location)) {
+		/* No Operation */
+	} else if (wrap_asset->key_location == KEY_IN_OTP) { /* OTP */
+		secure_store_config->wrap_asset.key_location = wrap_asset->key_location;
+		secure_store_config->wrap_asset.u.asset_number = wrap_asset->u.asset_number;
+
+	} else if (wrap_asset->key_location == KEY_IN_SST) { /* Secure Storage */
+		/* Not Implemented */
+	} else {
+		pr_err("Unsupported wrap key location:%d\n", wrap_asset->key_location);
+		ret = false;
+	}
+
+	return ret;
+}
+
+const char * SST_ERR_INFO(int errcode)
+{
+	switch(errcode) {
+		case -SST_OBJ_NOT_FOUND_ERR:
+			return "Object not found";
+		case -SST_OBJ_POLICY_NOT_FOUND_ERR:
+			return "Policy not found";
+		case -SST_POLICY_NOT_MATCHED_ERR:
+			return "Policy not matched";
+		case -SST_SSHANDLE_NOT_MATCHED_ERR:
+			return "SShandle not matched";
+		case -SST_OBJ_ATR_NOT_MATCHED_ERR:
+			return "Object attr not matched";
+		case -SST_OBJ_ID_GENERATION_ERR:
+			return "Object ID geneation error";
+		case -SST_OBJ_NODE_MEM_ALLOC_ERR:
+			return "Node momory allocation error";
+		case -SST_ICC_POOL_ALLOC_ERR:
+			return "ICC mempool alloc error";
+		case -SST_OBJ_ALREADY_EXIST_ERR:
+			return "Object already exist error";
+		case -SST_OBJ_CREATE_REQ_ERR:
+			return "Create request error";
+		case -SST_OBJ_OPEN_REQ_ERR:
+			return "Open request error";
+		case -SST_OBJ_SAVE_REQ_ERR:
+			return "Save request error";
+		case -SST_OBJ_LOAD_REQ_ERR:
+			return "Load request error";
+		case -SST_OBJ_DELETE_REQ_ERR:
+			return "Delete request error";
+	}
+
+	return "Unknown error code";
+}
 
 long sse_sec_storage_client_ioctl(struct file *fd,
 						unsigned int cmd, unsigned long arg)
@@ -160,10 +234,13 @@ long sse_sec_storage_client_ioctl(struct file *fd,
                 goto finish;
             }
 
-			/* Construct icc_msg_t */
-			ret = sse_secure_storage_create_open(sst_param, secure_store_config);
+	    /* Construct icc_msg_t */
+	    ret = sse_secure_storage_create_open(sst_param, secure_store_config);
             if (ret < 0) {
-                pr_err("secure storage Failed to open the Object\n");
+		pr_err("secure storage Failed to %s the Object [%s] Response:%d -> (%s)\n",
+			sst_param->secure_store_flags & SS_CREATE ? "create":"open",
+			secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
+
                 goto finish;
             }
             if (copy_to_user((void *)arg, sst_param, sizeof(sst_param_t))) {
@@ -189,7 +266,8 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			ret =
 				sse_secure_storage_save(sst_data_param, secure_store_config);
             if (ret < 0) {
-                pr_err("secure storage Failed to save the Object\n");
+                pr_err("secure storage Failed to save the Object [%s] Response:%d -> (%s)\n",
+			secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
                 goto finish;
             }
             break;
@@ -210,7 +288,8 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			ret =
 				sse_secure_storage_load(sst_data_param, secure_store_config);
             if (ret < 0) {
-                pr_err("secure storage Failed to load the Object\n");
+                pr_err("secure storage Failed to load the Object [%s] Response:%d -> (%s)\n",
+			secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
                 goto finish;
             }
             break;
@@ -232,7 +311,8 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			ret =
 				sse_secure_storage_close_delete(sst_param, secure_store_config);
             if (ret < 0) {
-                pr_err("secure storage Failed to delete the Object\n");
+                pr_err("secure storage Failed to delete the Object [%s] Response:%d -> (%s)\n",
+			secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
                 goto finish;
             }
             break;
@@ -271,6 +351,12 @@ int sse_secure_storage_create_open(sst_param_t *sst_param,
 	secure_store_config->policy.uid_val = secure_store_config->uid_val;
 	secure_store_config->policy.gid_val = secure_store_config->gid_val;
     secure_store_config->flags = sst_param->secure_store_flags;
+
+	if (sse_copy_wrap_asset(&sst_param->sst_access_policy.wrap_asset, secure_store_config) == false) {
+		ret = -EINVAL;
+		goto finish;
+	}
+
     sst_client_msg.msg_id = SS_SST_CREATE_OPEN;
 
     if ((ret_msg = kzalloc(sizeof(icc_msg_t), GFP_DMA)) == NULL) {
@@ -303,9 +389,14 @@ int sse_secure_storage_save(sst_data_param_t *sst_save_param,
     icc_msg_t *ret_msg = NULL, sst_client_msg;
     int ret = 0;
     void *data_buf = NULL;
-	dma_addr_t sst_dma_addr;
+    dma_addr_t sst_dma_addr = 0;
 
     memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+
+	if (sse_copy_wrap_asset(&sst_save_param->wrap_asset, secure_store_config) == false) {
+		ret = -EINVAL;
+		goto finish;
+	}
 
 	if (sst_save_param->payload_len <= 0) {
 		pr_err("Requested data length is not valid\n");
@@ -320,12 +411,20 @@ int sse_secure_storage_save(sst_data_param_t *sst_save_param,
 		goto finish;
 	}
 
-    if (copy_from_user
-       (data_buf, sst_save_param->payload, sst_save_param->payload_len)) {
-        pr_err("copy_from_user error\r\n");
-        ret = -EAGAIN;
-        goto finish;
-    }
+	if (sst_save_param->payload) {
+		if (access_ok(sst_save_param->payload, sst_save_param->payload_len)) { /* User Buffer */
+			if (copy_from_user(data_buf, sst_save_param->payload, sst_save_param->payload_len)) {
+				pr_err("copy_from_user error: sst_save_param->payload:[%p] sst_save_param->payload_len:%lu\r\n",
+					 sst_save_param->payload, sst_save_param->payload_len);
+				ret = -EAGAIN;
+				goto finish;
+			}
+		} else { /* Kernel Buffer */
+			memcpy(data_buf, sst_save_param->payload, sst_save_param->payload_len);
+		}
+	} else {
+		pr_err("SST Save Payload buffer is NULL.\n");
+	}
     sst_client_msg.msg_id = SS_SST_SAVE;
 	sst_dma_addr = dma_map_single_attrs(iccpool_inf.icc_dev, data_buf,
 				sst_save_param->payload_len, DMA_BIDIRECTIONAL, DMA_ATTR_NON_CONSISTENT);
@@ -359,7 +458,8 @@ finish:
 		kfree(ret_msg);
 
 	if (data_buf) {
-		dma_sync_single_for_cpu(iccpool_inf.icc_dev, sst_dma_addr, sst_save_param->payload_len, DMA_TO_DEVICE);
+		if (sst_dma_addr)
+			dma_sync_single_for_cpu(iccpool_inf.icc_dev, sst_dma_addr, sst_save_param->payload_len, DMA_TO_DEVICE);
 		gen_pool_free(iccpool_inf.icc_pool, (unsigned long)data_buf, sst_save_param->payload_len);
 	}
 
@@ -375,6 +475,11 @@ int sse_secure_storage_load(sst_data_param_t *sst_load_param,
 	dma_addr_t sst_dma_addr;
 
     memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+
+	if (sse_copy_wrap_asset(&sst_load_param->wrap_asset, secure_store_config) == false) {
+		ret = -EINVAL;
+		goto finish;
+	}
 
     if (!sst_load_param->payload || sst_load_param->payload_len <= 0) {
         pr_err
@@ -419,10 +524,18 @@ int sse_secure_storage_load(sst_data_param_t *sst_load_param,
 		if (ret < 0)
 			goto finish;
 		dma_sync_single_for_cpu(iccpool_inf.icc_dev, sst_dma_addr, ret, DMA_FROM_DEVICE);
-		if (copy_to_user((void *)sst_load_param->payload, data_buf, ret)) {
-			pr_err("copy_to_user error\r\n");
-			ret = -EFAULT;
-			goto finish;
+		if (sst_load_param->payload) {
+			if (access_ok(sst_load_param->payload, ret)) { /* User Buffer */
+				if (copy_to_user((void *)sst_load_param->payload, data_buf, ret)) {
+					pr_err("copy_to_user error\r\n");
+					ret = -EFAULT;
+					goto finish;
+				}
+			} else { /* Kernel Buffer */
+				memcpy((void *)sst_load_param->payload, data_buf, ret);
+			}
+		} else {
+			pr_err("SST Load Payload buffer is NULL.\n");
 		}
 	}
 
@@ -601,6 +714,13 @@ int __init sse_sec_storage_client_init(void)
 		ret = -EFAULT;
 		goto finish;
 	}
+
+	sse_secure_storage_create_open_fn = sse_secure_storage_create_open;
+	sse_secure_storage_save_fn = sse_secure_storage_save;
+	sse_secure_storage_load_fn = sse_secure_storage_load;
+	sse_secure_storage_close_delete_fn = sse_secure_storage_close_delete;
+	pr_info("sse_secure_storage_create_open_fn:%p sse_secure_storage_save_fn:%p\n",
+		sse_secure_storage_create_open_fn, sse_secure_storage_save_fn);
 
 	init_waitqueue_head(&sec_storage_wakeuplist);
 	mutex_init(&sec_storage_client_mutex);

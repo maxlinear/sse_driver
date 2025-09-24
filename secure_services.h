@@ -154,6 +154,12 @@ enum icc_secdbg_request {
 	SECURE_DEBUG_AUTH_STOP_RES,
 };
 
+enum key_location {
+	NO_WRAP_KEY = 0b00,
+	KEY_IN_OTP = 0b01,            /* OTP */
+	KEY_IN_SST = 0b10             /* Secure Storage */
+};
+
 /*! 
  *     \brief Contains the file parameter list
  */
@@ -187,25 +193,56 @@ typedef struct {
 } sst_access_perm_t;
 
 typedef struct {
-    union {
-        struct {
-            uint16_t lock:1;			/* !< set lock bit secure store. secure store
-										will no longer modify this file. */
-            uint16_t no_load_to_userspace:1;	/* !< SSC holds onto object and allows
-												application in userspace to use it
-												in signing/encryption operations by
-												handle */
-            uint16_t read_once:1;		/* !< Read the object once per boot */
-            uint16_t ignore_uid:1;		/* !< Ignore UID in Policy */
-            uint16_t ignore_gid:1;		/* !< Ignore GID in Policy Enforcement */
-            uint16_t ignore_pname:1;	/* !< Ignore pname in policy Enforcement */
-            uint16_t wrap_flag:2;		/* Wrapped flag */
+	union {
+		struct {
+			uint16_t lock:1;			/* !< set lock bit secure store. secure store
+								   will no longer modify this file. */
+			uint16_t no_load_to_userspace:1;	/* !< SSC holds onto object and allows
+								   application in userspace to use it
+								   in signing/encryption operations by
+								   handle */
+			uint16_t read_once:1;		/* !< Read the object once per boot */
+			uint16_t ignore_uid:1;		/* !< Ignore UID in Policy */
+			uint16_t ignore_gid:1;		/* !< Ignore GID in Policy Enforcement */
+			uint16_t ignore_pname:1;		/* !< Ignore pname in policy Enforcement */
+			uint16_t wrap_flag:2;		/* Wrapped flag */
 			uint16_t admin_store:1;		/* Admin/Normal store access */
-			uint16_t reserve:7;			/* Reserved for furture use */
-        } field;
-        uint16_t attr;
-    } u;
+			uint16_t tee_only:1;		/* TEE only access mode */
+			uint16_t reserve:6;			/* Reserved for furture use */
+		} field;
+		uint16_t attr;
+	} u;
 } sst_policy_attr_t;
+
+/**
+ * struct sst_wrap_params - represents secure storage information of the wrap key
+ * @handle  : 64-bit secure storage handle of opened sst wrap key object
+ * @access_perm : access permissions associated with sst wrap key object
+ * @policy_attr : policy attributes for enforcing policy check
+ * @crypto_mode_flag  : crypto mode options like integrity, encryption etc...
+ */
+struct sst_wrap_params {
+	uint64_t handle;
+	uint8_t access_perm;
+	uint16_t policy_attr;
+	uint16_t crypto_mode_flag;
+};
+
+typedef struct {
+	enum key_location key_location;
+	union {/* secure storage object wrap params or OTP asset ID */
+		struct sst_wrap_params sst_wrap;
+		unsigned int asset_number;
+	} u;
+} secure_wrap_asset_t;
+
+typedef struct {
+	enum key_location key_location;
+	union {/* secure storage object wrap param pointer or OTP asset ID */
+		unsigned int wrap_handle;
+		unsigned int asset_number;
+	} u;
+} secure_wrap_asset_tep_t;
 
 /*! 
  *     \brief Contains the secure storage access policy parameters
@@ -214,6 +251,7 @@ typedef struct {
 	sst_access_perm_t  access_perm;				/* Object access permission*/
 	sst_policy_attr_t policy_attr;				/* Object access attributs */
 	sst_crypto_mode_flag_t crypto_mode_flag;	/* Object crypto flag */
+	secure_wrap_asset_t wrap_asset;				/* Wrap Object configuration */
 } sst_obj_config_t;
 
 
@@ -227,6 +265,7 @@ typedef struct {
 
 typedef struct {
 	sshandle_t ss_handle;
+	secure_wrap_asset_t wrap_asset;	/* Wrap Object configuration */
 	size_t payload_len;
 	const unsigned char *payload;
 } sst_data_param_t;
