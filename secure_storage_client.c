@@ -27,6 +27,7 @@
 #include <linux/scatterlist.h>
 #include <linux/cred.h>
 #include <linux/sched.h>
+#include <linux/pid.h>
 #include <linux/string.h>
 #include <asm/io.h>
 #include "drv_icc.h"
@@ -365,6 +366,7 @@ int sse_secure_storage_create_open(sst_param_t *sst_param,
         goto finish;
     }
 
+	sst_client_msg.param[SS_ICC_PARAM_1] = (uint32_t)task_pid_nr(current);
 	ret = sse_secure_storage_send_icc_msg(&sst_client_msg, ret_msg, secure_store_config);
 	if (!ret) {
 		sst_param->ss_handle = (((long int)ret_msg->param[SS_ICC_PARAM_2] & 0xffffffff) << 32);
