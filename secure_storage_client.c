@@ -44,6 +44,7 @@ MODULE_AUTHOR("MaxLinear Inc");
 MODULE_DESCRIPTION("Secure Storage Driver");
 
 struct mutex sec_storage_client_mutex;
+struct mutex sec_storage_client_api_mutex;
 static wait_queue_head_t sec_storage_wakeuplist;
 static refcount_t sec_storage_wakeup = REFCOUNT_INIT(0);
 
@@ -73,7 +74,22 @@ extern int (*sse_secure_storage_load_fn)(sst_data_param_t *sst_load_param,
 
 extern int (*sse_secure_storage_close_delete_fn)(sst_param_t *sst_del_param,
                                         sst_config_t *secure_store_config);
+extern void (*sse_secure_storage_lock_unlock_fn) (int operation);
 
+
+void sse_secure_storage_lock_unlock (int operation)
+{
+	switch (operation) {
+		case 0:
+			mutex_unlock(&sec_storage_client_mutex);
+			break;
+		case 1:
+			mutex_lock(&sec_storage_client_mutex);
+			break;
+		default:
+			break;
+	}
+}
 
 #ifdef SST_DEBUG
 static void dump_ss_config(sst_config_t *dump_msg)
@@ -149,6 +165,7 @@ int sse_add_object_entry(sst_param_t *sst_param,  pid_t object_pid)
 	entry->object_pid = object_pid;
 	memcpy(&entry->sst_param, sst_param, sizeof(sst_param_t));
 	entry->sst_param.objectname =  kzalloc(FILEPNAME_MAX, GFP_DMA);
+	entry->sst_param.ss_handle = sst_param->ss_handle;
 	if (entry->sst_param.objectname == NULL) {
 		pr_err("Allocation failed. \r\n");
 		kfree(entry);
@@ -204,7 +221,6 @@ int sse_remove_object_entry(sst_param_t *sst_param)
 	}
 	return 0;
 }
-
 static bool sse_copy_wrap_asset(secure_wrap_asset_t *wrap_asset,
 				sst_config_t *secure_store_config)
 {
@@ -280,7 +296,7 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 	if (secure_store_config == NULL) {
 		pr_err("Memory Allocation for secure storage struct failed. \r\n");
 		ret = -ENOMEM;
-		goto finish;
+		return ret;
 	}
 	memset(secure_store_config, 0, sizeof(sst_config_t));
 	mutex_lock(&sec_storage_client_mutex);
@@ -367,7 +383,7 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			if (ret < 0) {
 				pr_err("secure storage Failed to %s the Object [%s] Response:%d -> (%s)\n",
 					sst_param->secure_store_flags & SS_CREATE ? "create":"open",
-					secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
+					sst_param->objectname, ret, SST_ERR_INFO(ret));
 				goto finish;
 			}
 			if (sse_add_object_entry(sst_param, task_pid_nr(current))) {
@@ -395,8 +411,8 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			}
 			ret = sse_secure_storage_save(sst_data_param, secure_store_config);
 			if (ret < 0) {
-				pr_err("secure storage Failed to save the Object [%s] Response:%d -> (%s)\n",
-					secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
+				pr_err("secure storage Failed to save the Object [%lx] Response:%d -> (%s)\n",
+					sst_data_param->ss_handle, ret, SST_ERR_INFO(ret));
 				goto finish;
 			}
 			break;
@@ -414,8 +430,8 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			}
 			ret =	sse_secure_storage_load(sst_data_param, secure_store_config);
 			if (ret < 0) {
-				pr_err("secure storage Failed to load the Object [%s] Response:%d -> (%s)\n",
-					secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
+				pr_err("secure storage Failed to load the Object [%lx] Response:%d -> (%s)\n",
+					 sst_data_param->ss_handle, ret, SST_ERR_INFO(ret));
 				goto finish;
 			}
 			break;
@@ -434,8 +450,11 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			}
 			ret =	sse_secure_storage_close_delete(sst_param, secure_store_config);
  			if (ret < 0) {
-				pr_err("secure storage Failed to delete the Object [%s] Response:%d -> (%s)\n",
-					secure_store_config->obj_name, ret, SST_ERR_INFO(ret));
+				pr_err("secure storage Failed to delete the Object [%lx] Response:%d -> (%s)\n",
+					 sst_param->ss_handle, ret, SST_ERR_INFO(ret));
+				if (ret == -SST_POLICY_NOT_MATCHED_ERR) {
+					sse_remove_object_entry(sst_param);
+				}
 				goto finish;
 			}
 			sse_remove_object_entry(sst_param);
@@ -446,11 +465,11 @@ long sse_sec_storage_client_ioctl(struct file *fd,
 			break;
 	}
 finish:
-	mutex_unlock(&sec_storage_client_mutex);
 	if (sst_param)
 		kfree(sst_param);
 	if (sst_data_param)
 		kfree(sst_data_param);
+	mutex_unlock(&sec_storage_client_mutex);
 	if (secure_store_config)
 		gen_pool_free(iccpool_inf.icc_pool, (unsigned long)secure_store_config, sizeof(sst_config_t));
 
@@ -463,6 +482,7 @@ int sse_secure_storage_create_open(sst_param_t *sst_param,
 	icc_msg_t *ret_msg = NULL, sst_client_msg;
 	int ret = 0;
 	memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+	mutex_lock(&sec_storage_client_api_mutex);
 
 	/* Copy the user data to secure_store_config and send to TEP */
 	strncpy(secure_store_config->obj_name, sst_param->objectname,FILEPNAME_MAX);
@@ -503,6 +523,7 @@ int sse_secure_storage_create_open(sst_param_t *sst_param,
 finish:
 	if (ret_msg)
 		kfree(ret_msg);
+	mutex_unlock(&sec_storage_client_api_mutex);
 
 	return ret;
 }
@@ -516,6 +537,7 @@ int sse_secure_storage_save(sst_data_param_t *sst_save_param,
 	dma_addr_t sst_dma_addr = 0;
 
 	memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+	mutex_lock(&sec_storage_client_api_mutex);
 
 	if (sse_copy_wrap_asset(&sst_save_param->wrap_asset, secure_store_config) == false) {
 		ret = -EINVAL;
@@ -584,6 +606,7 @@ finish:
 			dma_sync_single_for_cpu(iccpool_inf.icc_dev, sst_dma_addr, sst_save_param->payload_len, DMA_TO_DEVICE);
 		gen_pool_free(iccpool_inf.icc_pool, (unsigned long)data_buf, sst_save_param->payload_len);
 	}
+	mutex_unlock(&sec_storage_client_api_mutex);
 
 	return ret;
 }
@@ -597,6 +620,7 @@ int sse_secure_storage_load(sst_data_param_t *sst_load_param,
 	dma_addr_t sst_dma_addr;
 
 	memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+	mutex_lock(&sec_storage_client_api_mutex);
 
 	if (sse_copy_wrap_asset(&sst_load_param->wrap_asset, secure_store_config) == false) {
 		ret = -EINVAL;
@@ -664,6 +688,7 @@ finish:
 
 	if (data_buf)
 		gen_pool_free(iccpool_inf.icc_pool, (unsigned long)data_buf, sst_load_param->payload_len);
+	mutex_unlock(&sec_storage_client_api_mutex);
 
 	return ret;
 }
@@ -676,6 +701,8 @@ int sse_secure_storage_close_delete(sst_param_t *sst_del_param,
 	void *data_buf = NULL;
 
 	memset(&sst_client_msg, 0, sizeof(icc_msg_t));
+	mutex_lock(&sec_storage_client_api_mutex);
+
 	sst_client_msg.msg_id = SS_SST_DELETE_CLOSE;
 	secure_store_config->flags = sst_del_param->secure_store_flags;
 	sst_client_msg.param[SS_ICC_PARAM_1] = (uint32_t) (sst_del_param->ss_handle & 0xffffffff);
@@ -696,8 +723,34 @@ finish:
 		kfree(ret_msg);
 	if (data_buf)
 		kfree(data_buf);
-
+	 mutex_unlock(&sec_storage_client_api_mutex);
 	return ret;
+}
+
+int icc_flush(void)
+{
+	int icc_msg_flush_count, ret;
+	icc_msg_t icc_msg;
+	icc_msg_flush_count = icc_fifo_count(SECURE_STORAGE);
+	if (!icc_msg_flush_count)
+		return 0;
+	while (icc_msg_flush_count--) {
+		ret = wait_event_interruptible_timeout(sec_storage_wakeuplist, (refcount_read(&sec_storage_wakeup) != 0),
+						msecs_to_jiffies(2000));
+		if (ret == 0) {
+			pr_err("secure timeout ret:%d\n", ret);
+			return -ECONNREFUSED;
+		}
+		memset(&icc_msg, 0x0, sizeof(icc_msg_t));
+		ret = icc_read(SECURE_STORAGE, &icc_msg);
+		if (ret < 0) {
+			pr_err("failed to read icc message for open session ret:%d\n", ret);
+			return -ETIMEDOUT;
+		}
+		refcount_set(&sec_storage_wakeup, 0);
+        }
+        return 0;
+
 }
 
 int sse_secure_storage_send_icc_msg(icc_msg_t *sst_client_msg,
@@ -745,7 +798,7 @@ int sse_secure_storage_send_icc_msg(icc_msg_t *sst_client_msg,
 	dma_sync_single_for_device(iccpool_inf.icc_dev, sst_cfg_dma_addr, sizeof(sst_config_t), DMA_TO_DEVICE);
 	sst_client_msg->param[SS_ICC_PARAM_0] = (uint32_t)sst_cfg_dma_addr;
 	sst_client_msg->param[SS_ICC_PARAM_3] = (uint32_t)pObjectId;
-
+	icc_flush();
 #ifdef SST_DEBUG
 	dump_ss_config(secure_store_config);
 	dump_ss_icc_msg(sst_client_msg);
@@ -836,11 +889,13 @@ int __init sse_sec_storage_client_init(void)
 	sse_secure_storage_save_fn = sse_secure_storage_save;
 	sse_secure_storage_load_fn = sse_secure_storage_load;
 	sse_secure_storage_close_delete_fn = sse_secure_storage_close_delete;
+	sse_secure_storage_lock_unlock_fn = sse_secure_storage_lock_unlock;
 	pr_info("sse_secure_storage_create_open_fn:%p sse_secure_storage_save_fn:%p\n",
 		sse_secure_storage_create_open_fn, sse_secure_storage_save_fn);
 
 	init_waitqueue_head(&sec_storage_wakeuplist);
 	mutex_init(&sec_storage_client_mutex);
+	mutex_init(&sec_storage_client_api_mutex);
 	return ret;
 
 finish:
